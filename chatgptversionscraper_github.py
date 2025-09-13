@@ -125,9 +125,6 @@ def scrape_sales():
     driver = create_driver()
     driver.get("https://std.nest.net.np")
     
-    # ... (the rest of your scrape_sales function does not need to be changed) ...
-    # ... (it is very long, so I am omitting it for clarity, but you should keep it as is) ...
-
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     print(f"Page title: {driver.title}")
     
@@ -423,7 +420,8 @@ def scrape_sales():
             row[4] = screenshot_link
 
     driver.quit()
-    return all_rows
+    # --- MODIFIED --- Return both the rows and the screenshot link
+    return all_rows, screenshot_link
 
 # ... (The rest of your functions: setup_worksheet_headers, check_for_duplicates, etc. are all perfectly fine) ...
 # ... (Keep them exactly as they are) ...
@@ -526,15 +524,37 @@ def should_add_date_separator(worksheet, new_date):
         print(f"Error checking date separator: {e}")
         return False
 
+# --- REPLACED --- The main function is updated to handle the "no sales" case.
 def main():
     print("🚀 Starting sales scraper...")
     
-    rows = scrape_sales()
+    rows, screenshot_link = scrape_sales()
+    
+    # Handle the case where no sales are found
     if not rows:
         print("⚠ No sales found.")
+        now_utc = datetime.datetime.utcnow()
+        # The cron job runs at 11:55 UTC. Check for a small window around this time.
+        if now_utc.hour == 11 and 55 <= now_utc.minute <= 59:
+            print("This is the 11:55 UTC run. Preparing 'No Sales' entry for the sheet.")
+            today_date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            # Create a special row to be processed by the normal logic
+            rows = [[
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "No Sales Recorded",
+                f"NO_SALES_{today_date_str}", # Unique ID for duplicate checking
+                "",
+                screenshot_link
+            ]]
+        else:
+            print("Not the 11:55 UTC run, so no update will be made to the sheet.")
+            return # Exit if no sales and not the right time
+
+    # If rows is still empty (because it wasn't the 11:55 run), exit.
+    if not rows:
         return
 
-    print(f"\n📊 Processing {len(rows)} extracted sales...")
+    print(f"\n📊 Processing {len(rows)} entries...")
     
     # Open spreadsheet
     sh = gc.open_by_key(SPREADSHEET_ID)
@@ -543,39 +563,47 @@ def main():
     # Setup headers
     setup_worksheet_headers(worksheet)
     
-    # Check for duplicates
+    # Check for duplicates (will also check for our "NO_SALES_..." ID)
     unique_rows = check_for_duplicates(worksheet, rows)
     
     if unique_rows:
-        # Get current date from the first row
+        # Get current date
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
         
         # Check if we need to add a date separator (blank row)
         if should_add_date_separator(worksheet, current_date):
-            # Add a blank row before new data
             worksheet.append_row(["", "", "", "", ""])
             print("📅 Added blank row for new date separation")
         
         # Get the current row count to know where new data starts
         current_data = worksheet.get_all_values()
-        start_row = len(current_data) + 1  # +1 because rows are 1-indexed
+        start_row = len(current_data) + 1
         
         # Add new rows
         worksheet.append_rows(unique_rows)
-        print(f"✅ Successfully added {len(unique_rows)} new sales to spreadsheet!")
         
+        # Give a specific confirmation message
+        if unique_rows[0][1] == "No Sales Recorded":
+            print("✅ Successfully added 'No Sales Recorded' to spreadsheet!")
+        else:
+            print(f"✅ Successfully added {len(unique_rows)} new sales to spreadsheet!")
+
         # Merge screenshot cells if multiple rows were added
         if len(unique_rows) > 1:
             end_row = start_row + len(unique_rows) - 1
             merge_screenshot_cells(worksheet, start_row, end_row)
         
         # Print summary
-        print("\n📈 Summary of added sales:")
+        print("\n📈 Summary of added entries:")
         for row in unique_rows:
-            print(f"  • {row[1]}: Invoice #{row[2]}, Rs. {row[3]}")
+            if row[1] == "No Sales Recorded":
+                print(f"  • {row[1]} at {row[0]}")
+            else:
+                print(f"  • {row[1]}: Invoice #{row[2]}, Rs. {row[3]}")
     else:
-        print("ℹ No new sales to add (all were duplicates)")
+        print("ℹ No new entries to add (all were duplicates).")
 
 
 if __name__ == "__main__":
     main()
+
