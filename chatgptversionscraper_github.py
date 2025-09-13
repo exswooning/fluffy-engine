@@ -72,8 +72,8 @@ def upload_screenshot(file_path):
     """Uploads a file to Google Drive using the authenticated gspread session."""
     print(f"Uploading {file_path} to Google Drive...")
     
-    # Use the authenticated session from gspread's client
-    session = gc.ssession
+    # --- FIXED --- Changed gc.ssession to the correct gc.auth.session
+    session = gc.auth.session
     
     # 1. Get an upload URL
     metadata = {
