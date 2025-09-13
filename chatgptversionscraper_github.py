@@ -66,57 +66,62 @@ def create_driver():
     return driver
 
 
-# --- REPLACED --- PyDrive is removed. This new function uses the gspread credentials
-# to upload files directly, which is simpler and more reliable in an automated environment.
+# --- REPLACED --- This version is more robust with detailed logging and error handling.
 def upload_screenshot(file_path):
     """Uploads a file to Google Drive using the authenticated gspread session."""
     print(f"Uploading {file_path} to Google Drive...")
     
-    # --- FIXED --- Changed gc.ssession to the correct gc.auth.session
-    session = gc.auth.session
-    
-    # 1. Get an upload URL
-    metadata = {
-        'name': os.path.basename(file_path),
-        'parents': [DRIVE_FOLDER_ID]
-    }
-    files_url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable'
-    headers = {
-        'Authorization': 'Bearer ' + session.credentials.access_token,
-        'Content-Type': 'application/json'
-    }
-    r = session.post(files_url, headers=headers, data=json.dumps(metadata))
-    if 'Location' not in r.headers:
-        print("Error: Could not get upload URL from Google Drive.")
-        print("Response:", r.text)
-        return None
-    upload_url = r.headers['Location']
+    try:
+        session = gc.auth.session
+        
+        # 1. Get an upload URL
+        print("Step 1: Requesting upload URL...")
+        metadata = {
+            'name': os.path.basename(file_path),
+            'parents': [DRIVE_FOLDER_ID]
+        }
+        files_url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable'
+        headers = {
+            'Authorization': 'Bearer ' + session.credentials.access_token,
+            'Content-Type': 'application/json'
+        }
+        r = session.post(files_url, headers=headers, data=json.dumps(metadata))
+        r.raise_for_status() # Will raise an exception for 4xx/5xx errors
+        
+        if 'Location' not in r.headers:
+            print("Error: Could not get upload URL from Google Drive.")
+            print("Response:", r.text)
+            return None
+        upload_url = r.headers['Location']
+        print("Step 1 successful. Got upload URL.")
 
-    # 2. Upload the file content
-    with open(file_path, 'rb') as f:
-        file_data = f.read()
-    
-    upload_headers = {'Content-Type': 'image/png'} # Or the correct mime type
-    r_upload = session.put(upload_url, headers=upload_headers, data=file_data)
-    
-    if r_upload.status_code == 200:
-        file_id = r_upload.json()['id']
-        print(f"File uploaded successfully. File ID: {file_id}")
+        # 2. Upload the file content
+        print("Step 2: Uploading file content...")
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+        
+        upload_headers = {'Content-Type': 'image/png'}
+        r_upload = session.put(upload_url, headers=upload_headers, data=file_data)
+        r_upload.raise_for_status()
+        
+        response_json = r_upload.json()
+        file_id = response_json['id']
+        print(f"Step 2 successful. File uploaded. File ID: {file_id}")
         
         # 3. Make the file public (anyone with the link can view)
+        print("Step 3: Setting file permissions...")
         permission_url = f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions'
         permission_data = {'type': 'anyone', 'role': 'reader'}
         r_perm = session.post(permission_url, headers=headers, data=json.dumps(permission_data))
+        r_perm.raise_for_status()
         
-        if r_perm.status_code == 200:
-            print("File permission set to public.")
-            return f"https://drive.google.com/file/d/{file_id}/view?usp=drivesdk"
-        else:
-            print("Warning: Could not set file permission to public.")
-            return f"https://drive.google.com/file/d/{file_id}/" # Return non-public link
-    else:
-        print("Error: File upload failed.")
-        print("Response:", r_upload.text)
+        print("Step 3 successful. File permission set to public.")
+        return f"https://drive.google.com/file/d/{file_id}/view?usp=drivesdk"
+
+    except Exception as e:
+        print(f"An unexpected error occurred in upload_screenshot: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
