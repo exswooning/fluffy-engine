@@ -1,352 +1,257 @@
 import os
-import re
-import time
-import platform
+import tempfile
 import datetime
-import json 
-import requests 
+import time
+from dotenv import load_dotenv
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service 
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from dotenv import load_dotenv
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload
 import gspread
+import re
 
-# Load environment variables
-load_dotenv()
-
-# === Google Sheets + Drive Setup ===
+# --- Configuration ---
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+WEBSITE_URL = "http://std.nest.net.np/"
 CREDENTIALS_FILE = "credentials.json"
-SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 
-# --- Simplified authentication using the service account JSON file ---
-print("Authenticating with Google Service Account...")
-gc = gspread.service_account(filename=CREDENTIALS_FILE)
-print("Authentication successful.")
+# --- Helper Functions ---
 
+def load_environment_variables():
+    """Loads environment variables from the .env file."""
+    load_dotenv()
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    drive_folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 
-# === Selenium Setup ===
-def create_driver():
-    """Creates a Chrome driver with the correct options for local or GitHub Actions."""
-    chrome_options = Options()
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-    
-    if os.getenv('GITHUB_ACTIONS') == 'true':
-        print("Running in GitHub Actions environment. Using headless mode.")
-        chrome_options.add_argument("--headless=new")
-        chrome_options.binary_location = "/usr/bin/chromium-browser"
-        service = Service("/usr/bin/chromedriver")
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-    else:
-        print("Running in local environment.")
-        driver = webdriver.Chrome(options=chrome_options)
-    
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    return driver
+    if not sheet_id:
+        print("Error: Missing GOOGLE_SHEET_ID in .env file.")
+        return None, None
+    return sheet_id, drive_folder_id
 
+def authenticate_google_service_account():
+    """Authenticates using a service account credentials file."""
+    try:
+        if not os.path.exists(CREDENTIALS_FILE):
+            print(f"Error: Credentials file not found at '{CREDENTIALS_FILE}'")
+            return None, None
+            
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+        gc = gspread.authorize(creds)
+        drive_service = build('drive', 'v3', credentials=creds)
+        
+        print("✓ Google Service Account authentication successful.")
+        return gc, drive_service
+    except Exception as e:
+        print(f"An error occurred during Google authentication: {e}")
+        return None, None
 
-def upload_screenshot(file_path):
-    """Uploads a file to Google Drive using the authenticated gspread session."""
-    print(f"Uploading {file_path} to Google Drive...")
+def setup_driver():
+    """Sets up and returns a Selenium Chrome WebDriver instance for PythonAnywhere."""
+    print("Setting up browser driver for headless environment...")
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1200")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     
     try:
-        # --- FINAL FIX --- Changed to the correct gc.session
-        session = gc.session
-        
-        # 1. Get an upload URL
-        print("Step 1: Requesting upload URL...")
-        metadata = {
-            'name': os.path.basename(file_path),
-            'parents': [DRIVE_FOLDER_ID]
-        }
-        files_url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable'
-        headers = {
-            'Authorization': 'Bearer ' + session.credentials.access_token,
-            'Content-Type': 'application/json'
-        }
-        r = session.post(files_url, headers=headers, data=json.dumps(metadata))
-        r.raise_for_status()
-        
-        if 'Location' not in r.headers:
-            print("Error: Could not get upload URL from Google Drive.")
-            print("Response:", r.text)
-            return None
-        upload_url = r.headers['Location']
-        print("Step 1 successful. Got upload URL.")
-
-        # 2. Upload the file content
-        print("Step 2: Uploading file content...")
-        with open(file_path, 'rb') as f:
-            file_data = f.read()
-        
-        upload_headers = {'Content-Type': 'image/png'}
-        r_upload = session.put(upload_url, headers=upload_headers, data=file_data)
-        r_upload.raise_for_status()
-        
-        response_json = r_upload.json()
-        file_id = response_json['id']
-        print(f"Step 2 successful. File uploaded. File ID: {file_id}")
-        
-        # 3. Make the file public
-        print("Step 3: Setting file permissions...")
-        permission_url = f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions'
-        permission_data = {'type': 'anyone', 'role': 'reader'}
-        r_perm = session.post(permission_url, headers=headers, data=json.dumps(permission_data))
-        r_perm.raise_for_status()
-        
-        print("Step 3 successful. File permission set to public.")
-        return f"https://drive.google.com/file/d/{file_id}/view?usp=drivesdk"
-
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        return driver
     except Exception as e:
-        print(f"An unexpected error occurred in upload_screenshot: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error setting up WebDriver: {e}")
         return None
 
+def extract_sales_data(driver):
+    """Main function to control the scraping process."""
+    all_sales_data = []
+    
+    leaderboard_entries = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")
+    num_entries = len(leaderboard_entries)
+    print(f"Found {num_entries} leaderboard entries.")
 
-def scrape_sales():
-    driver = create_driver()
-    driver.get("https://std.nest.net.np")
-    
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    print(f"Page title: {driver.title}")
-    
-    print("Waiting for page content to load...")
-    time.sleep(5)
-    
-    for attempt in range(5):
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        print(f"Attempt {attempt + 1}: Page content: {page_text[:100]}...")
-        if "Loading..." not in page_text:
-            print("Content has loaded!")
-            break
-        else:
-            print("Still loading, waiting 3 more seconds...")
-            time.sleep(3)
-    
-    leaders = []
-    try:
-        print("Trying to find leader elements...")
-        # Simplified the selector logic based on previous logs
-        leaders = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")
-        if not leaders:
-             leaders = driver.find_elements(By.CSS_SELECTOR, "div.MuiPaper-root")
-        if not leaders:
-            leaders = driver.find_elements(By.CSS_SELECTOR, "div[class*='item']")
-        print(f"Found {len(leaders)} potential leader elements.")
-
-    except Exception as e:
-        print(f"Error finding page elements: {e}")
-        
-    all_rows = []
-    screenshot_link = ""
-    
-    print(f"\n=== Processing {len(leaders)} leader elements ===")
-    
-    leader_cards = [leader for leader in leaders if "#" in leader.text and "Leaderboard" not in leader.text]
-    if not leader_cards and leaders: # Fallback if primary filter fails
-        leader_cards = leaders
-
-    print(f"Found {len(leader_cards)} actual leader cards to process")
-    
-    for i, leader in enumerate(leader_cards):
+    for i in range(num_entries):
         try:
-            text = leader.text.strip()
-            print(f"\n=== Processing Leader {i+1} ===")
-            print(f"Initial text: {text[:150]}...")
+            current_entries = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")
+            entry_element = current_entries[i]
             
-            name_match = re.search(r"#\d+\s+([^\n🧾💵]+)", text)
-            name_text = name_match.group(1).strip() if name_match else "Unknown"
-            print(f"Extracted name: '{name_text}'")
-            
-            if name_text == "Unknown" or not name_text:
-                print("Skipping - no valid name found")
-                continue
-                
-            detailed_sales_found = False
+            entry_name = f"Entry {i+1}"
             try:
-                print("Attempting to click and expand...")
-                driver.execute_script("arguments[0].scrollIntoView(true);", leader)
-                time.sleep(1)
-                leader.click()
-                time.sleep(3)
-                
-                expanded_text = leader.text.strip()
-                if len(expanded_text) > len(text):
-                    print(f"Successfully expanded! New text: {expanded_text[:300]}...")
-                    text = expanded_text
-                    
-                    sales_patterns = [
-                        r"Sale of Rs\.?\s*([\d,]+\.?\d*).*?Invoice ID:\s*#?(\d+)",
-                        r"Rs\.?\s*([\d,]+\.?\d*).*?#(\d+)"
-                    ]
-                    
-                    for pattern in sales_patterns:
-                        sales_matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
-                        if sales_matches:
-                            detailed_sales_found = True
-                            for amount, invoice_id in sales_matches:
-                                clean_amount = amount.replace(',', '')
-                                row = [
-                                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    name_text, invoice_id, clean_amount, ""
-                                ]
-                                all_rows.append(row)
-                                print(f"✅ Added detailed sale: {name_text}, Invoice #{invoice_id}, Amount: Rs. {clean_amount}")
-                            break
-            except Exception as click_error:
-                print(f"Could not click/expand element: {click_error}")
+                name_element = entry_element.find_element(By.CSS_SELECTOR, "span.font-semibold")
+                entry_name = name_element.text.strip()
+            except NoSuchElementException:
+                print(f"Could not find name for entry {i+1}, using default.")
+
+            print(f"\n--- Processing: {entry_name} ---")
+
+            initial_text_length = len(entry_element.text)
             
-            if not detailed_sales_found:
-                print("No detailed sales found, trying summary extraction...")
-                summary_match = re.search(r"🧾\s*(\d+)\s*sales?\s*\|\s*💵\s*Rs\.?\s*([\d,]+\.?\d*)", text, re.IGNORECASE)
-                if summary_match:
-                    sales_count, total_amount = summary_match.groups()
-                    clean_amount = total_amount.replace(',', '')
-                    summary_id = f"SUMMARY_{int(time.time())}"
-                    row = [
-                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        name_text, summary_id, clean_amount, ""
-                    ]
-                    all_rows.append(row)
-                    print(f"✅ Added summary: {name_text}, ID: {summary_id}, Amount: Rs. {clean_amount}")
+            print("  Attempting to click and expand...")
+            driver.execute_script("arguments[0].click();", entry_element)
+            
+            WebDriverWait(driver, 10).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i].text) > initial_text_length
+            )
+            print("  ✓ Expansion confirmed by content change.")
 
+            expanded_entry_element = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i]
+            full_text = expanded_entry_element.text
+            
+            sales_pattern = r"Sale of Rs\.?\s*([\d,]+\.?\d*).*?Invoice ID:\s*#?(\d+)"
+            matches = re.findall(sales_pattern, full_text, re.IGNORECASE)
+            
+            if not matches:
+                print(f"  ⚠️ No detailed sales found for {entry_name} after expansion.")
+                continue
+
+            for amount, invoice_id in matches:
+                clean_amount = amount.replace(',', '')
+                sale_record = {
+                    'name': entry_name,
+                    'amount': clean_amount,
+                    'invoice': invoice_id
+                }
+                all_sales_data.append(sale_record)
+                print(f"    ✓ Extracted Sale: Amount=Rs.{clean_amount}, Invoice=#{invoice_id}")
+        
+        except TimeoutException:
+            print(f"  ❌ Timed out waiting for {entry_name} to expand. Skipping.")
         except Exception as e:
-            print(f"Error parsing leader {i+1}: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"  ❌ An error occurred processing {entry_name}: {e}")
+            
+    return all_sales_data
 
-    today_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    daily_screenshot_path = os.path.join(os.getcwd(), f"daily_sales_screenshot_{today_date}.png")
-    screenshot_link_file = os.path.join(os.getcwd(), f"screenshot_link_{today_date}.txt")
-    
-    if os.path.exists(daily_screenshot_path) and os.path.exists(screenshot_link_file):
-        print(f"\n📸 Using existing screenshot and link for today.")
-        with open(screenshot_link_file, 'r') as f:
-            screenshot_link = f.read().strip()
-    else:
-        print(f"\n📸 Taking new daily screenshot...")
-        driver.save_screenshot(daily_screenshot_path)
-        screenshot_link = upload_screenshot(daily_screenshot_path)
-        print(f"Screenshot uploaded: {screenshot_link}")
-        if screenshot_link:
-            with open(screenshot_link_file, 'w') as f:
-                f.write(screenshot_link)
-    
-    for row in all_rows:
-        row[4] = screenshot_link
-
-    driver.quit()
-    return all_rows, screenshot_link
-
-def setup_worksheet_headers(worksheet):
+def upload_to_drive(drive_service, file_path, folder_id):
+    """Uploads a file to a specific Google Drive folder."""
+    if not folder_id:
+        print("Google Drive Folder ID not provided, skipping upload.")
+        return "Upload Skipped"
     try:
-        headers = worksheet.row_values(1)
-        expected_headers = ["Timestamp", "Name", "Invoice ID", "Amount", "Screenshot Link"]
-        if not headers or headers != expected_headers:
-            worksheet.clear()
-            worksheet.append_row(expected_headers)
-            print("Headers added to worksheet")
-    except Exception as e:
-        print(f"Error setting up headers: {e}")
+        file_metadata = {'name': os.path.basename(file_path), 'parents': [folder_id]}
+        media = MediaFileUpload(file_path, mimetype='image/png')
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='webViewLink').execute()
+        link = file.get('webViewLink')
+        print(f"✓ Screenshot uploaded successfully: {link}")
+        return link
+    except HttpError as error:
+        print(f"An error occurred during file upload: {error}")
+        return "Upload Failed"
 
-def check_for_duplicates(worksheet, new_rows):
+def check_for_duplicates(worksheet, sales_records):
+    """Filters out sales records that already exist in the sheet."""
+    print("Checking for duplicate entries...")
     try:
-        existing_data = worksheet.get_all_values()[1:]
-        existing_invoices = set(row[2] for row in existing_data if len(row) > 2)
-        unique_rows = []
-        for row in new_rows:
-            if row[2] not in existing_invoices:
-                unique_rows.append(row)
-                existing_invoices.add(row[2])
+        existing_data = worksheet.get_all_values()
+        # Create a set of existing invoice IDs (from the 3rd column, index 2)
+        existing_invoices = set(row[2] for row in existing_data[1:]) # Skip header
+        
+        unique_records = []
+        for record in sales_records:
+            if record['invoice'] not in existing_invoices:
+                unique_records.append(record)
             else:
-                print(f"⚠ Skipping duplicate: Invoice #{row[2]}")
-        return unique_rows
+                print(f"  - Skipping duplicate invoice: #{record['invoice']}")
+        
+        print(f"Found {len(unique_records)} new unique sales to add.")
+        return unique_records
     except Exception as e:
-        print(f"Error checking duplicates: {e}")
-        return new_rows
-
-def merge_screenshot_cells(worksheet, start_row, end_row):
-    try:
-        if start_row < end_row:
-            merge_request = {
-                "requests": [{"mergeCells": {
-                    "range": {
-                        "sheetId": worksheet.id, "startRowIndex": start_row - 1,
-                        "endRowIndex": end_row, "startColumnIndex": 4, "endColumnIndex": 5
-                    }, "mergeType": "MERGE_ALL"
-                }}]
-            }
-            worksheet.spreadsheet.batch_update(merge_request)
-            print(f"🔗 Merged screenshot cells: E{start_row}:E{end_row}")
-    except Exception as e:
-        print(f"Error merging cells: {e}")
-
-def should_add_date_separator(worksheet, new_date):
-    try:
-        last_row = worksheet.get_all_values()[-1]
-        if last_row and last_row[0]:
-            last_date = last_row[0].split(' ')[0]
-            return last_date != new_date
-        return False
-    except (IndexError, gspread.exceptions.APIError):
-        return False # Cannot determine last date, so don't add separator
+        print(f"Could not check for duplicates due to an error: {e}. Appending all data.")
+        return sales_records
 
 def main():
-    print("🚀 Starting sales scraper...")
-    rows, screenshot_link = scrape_sales()
+    """Main function to orchestrate the scraping and data upload process."""
+    print("\n======== Starting PythonAnywhere Scraper ========")
     
-    if not rows:
-        print("⚠ No sales found.")
-        now_utc = datetime.datetime.utcnow()
-        if now_utc.hour == 11 and 55 <= now_utc.minute <= 59:
-            print("This is the 11:55 UTC run. Preparing 'No Sales' entry.")
-            today_date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-            rows = [[
-                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "No Sales Recorded", f"NO_SALES_{today_date_str}", "", screenshot_link
-            ]]
-        else:
-            print("Not the 11:55 UTC run, no update will be made.")
+    spreadsheet_id, drive_folder_id = load_environment_variables()
+    if not spreadsheet_id: return
+        
+    gc, drive_service = authenticate_google_service_account()
+    if not gc or not drive_service: return
+
+    driver = setup_driver()
+    if not driver: return
+
+    try:
+        print(f"Navigating to {WEBSITE_URL}...")
+        driver.get(WEBSITE_URL)
+        wait = WebDriverWait(driver, 20)
+        
+        print("Waiting for main sales container to load...")
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.space-y-4")))
+        
+        print("Main container found. Allowing page to render...")
+        time.sleep(5)
+
+        sales_data = extract_sales_data(driver)
+        
+        print(f"\n📊 FINAL RESULTS: Found {len(sales_data)} total sales records.")
+
+        if not sales_data:
+            print("No new data to upload.")
             return
 
-    if not rows: return
+        # --- Update Google Sheet ---
+        print("Opening Google Sheet...")
+        worksheet = gc.open_by_key(spreadsheet_id).sheet1
 
-    print(f"\n📊 Processing {len(rows)} entries...")
-    worksheet = gc.open_by_key(SPREADSHEET_ID).sheet1
-    setup_worksheet_headers(worksheet)
-    unique_rows = check_for_duplicates(worksheet, rows)
-    
-    if unique_rows:
-        current_date = datetime.datetime.now().strftime("%Y-%m-%d")
-        if should_add_date_separator(worksheet, current_date):
-            worksheet.append_row(["", "", "", "", ""])
-            print("📅 Added blank row for new date separation")
-        
-        start_row = len(worksheet.get_all_values()) + 1
-        worksheet.append_rows(unique_rows)
-        
-        if unique_rows[0][1] == "No Sales Recorded":
-            print("✅ Successfully added 'No Sales Recorded' to spreadsheet!")
-        else:
-            print(f"✅ Successfully added {len(unique_rows)} new sales to spreadsheet!")
+        # NEW: Check for duplicates before proceeding
+        unique_sales_data = check_for_duplicates(worksheet, sales_data)
 
-        if len(unique_rows) > 1:
-            merge_screenshot_cells(worksheet, start_row, start_row + len(unique_rows) - 1)
+        if not unique_sales_data:
+            print("No new unique data to upload.")
+            return
+
+        # --- Screenshot and Upload (only if there's new data) ---
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        screenshot_filename = f"sales_screenshot_{timestamp}.png"
+        temp_dir = tempfile.gettempdir()
+        screenshot_path = os.path.join(temp_dir, screenshot_filename)
+
+        print(f"Taking screenshot: {screenshot_path}")
+        driver.save_screenshot(screenshot_path)
         
-        print("\n📈 Summary of added entries:")
-        for row in unique_rows:
-            print(f"  • {row[1]}: Invoice #{row[2]}, Rs. {row[3]}" if row[1] != "No Sales Recorded" else f"  • {row[1]}")
-    else:
-        print("ℹ No new entries to add (all were duplicates).")
+        screenshot_link = upload_to_drive(drive_service, screenshot_path, drive_folder_id)
+        
+        print("Preparing data for upload...")
+        rows_to_append = []
+        
+        # Add headers only if the sheet is completely empty
+        if not worksheet.get_all_values():
+            rows_to_append.append(["Timestamp", "Name", "Invoice ID", "Amount", "Screenshot Link"])
+
+        for sale in unique_sales_data:
+            rows_to_append.append([
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                sale["name"],
+                sale["invoice"],
+                sale["amount"],
+                screenshot_link
+            ])
+
+        print(f"Appending {len(rows_to_append)} rows to the sheet...")
+        worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
+        
+        print("🎉 SUCCESS: Data uploaded to Google Sheet!")
+
+    except Exception as e:
+        print(f"A critical error occurred: {e}")
+    finally:
+        if driver:
+            driver.quit()
+        if 'screenshot_path' in locals() and os.path.exists(screenshot_path):
+            os.remove(screenshot_path)
+            print("Cleaned up temporary screenshot.")
+            
+        print("\n======== Script Finished ========")
 
 if __name__ == "__main__":
     main()
