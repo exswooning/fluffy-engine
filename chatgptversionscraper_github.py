@@ -9,6 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -53,7 +54,7 @@ def authenticate_google_service_account():
         return None, None
 
 def setup_driver():
-    """Sets up and returns a Selenium Chrome WebDriver instance for PythonAnywhere."""
+    """Sets up and returns a Selenium Chrome WebDriver instance for a server environment."""
     print("Setting up browser driver for headless environment...")
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
@@ -62,18 +63,23 @@ def setup_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1200")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
     
     try:
         service = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         return driver
     except Exception as e:
         print(f"Error setting up WebDriver: {e}")
         return None
 
 def extract_sales_data(driver):
-    """Main function to control the scraping process."""
+    """Controls the scraping process with a robust click-and-verify loop."""
     all_sales_data = []
+    wait = WebDriverWait(driver, 15)
     
     leaderboard_entries = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")
     num_entries = len(leaderboard_entries)
@@ -81,6 +87,7 @@ def extract_sales_data(driver):
 
     for i in range(num_entries):
         try:
+            # Re-find elements each time to prevent stale references
             current_entries = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")
             entry_element = current_entries[i]
             
@@ -89,16 +96,17 @@ def extract_sales_data(driver):
                 name_element = entry_element.find_element(By.CSS_SELECTOR, "span.font-semibold")
                 entry_name = name_element.text.strip()
             except NoSuchElementException:
-                print(f"Could not find name for entry {i+1}, using default.")
+                print(f"Could not find name for entry {i+1}.")
 
             print(f"\n--- Processing: {entry_name} ---")
 
             initial_text_length = len(entry_element.text)
             
-            print("  Attempting to click and expand...")
-            driver.execute_script("arguments[0].click();", entry_element)
+            print("  Attempting human-like click to expand...")
+            ActionChains(driver).move_to_element(entry_element).click().perform()
             
-            WebDriverWait(driver, 10).until(
+            # Wait for the content to change by checking for an increase in text length
+            wait.until(
                 lambda d: len(d.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i].text) > initial_text_length
             )
             print("  ✓ Expansion confirmed by content change.")
@@ -115,16 +123,12 @@ def extract_sales_data(driver):
 
             for amount, invoice_id in matches:
                 clean_amount = amount.replace(',', '')
-                sale_record = {
-                    'name': entry_name,
-                    'amount': clean_amount,
-                    'invoice': invoice_id
-                }
+                sale_record = {'name': entry_name, 'amount': clean_amount, 'invoice': invoice_id}
                 all_sales_data.append(sale_record)
                 print(f"    ✓ Extracted Sale: Amount=Rs.{clean_amount}, Invoice=#{invoice_id}")
         
         except TimeoutException:
-            print(f"  ❌ Timed out waiting for {entry_name} to expand. Skipping.")
+            print(f"  ❌ Timed out waiting for {entry_name} to expand. The site may be slow or the click failed. Skipping.")
         except Exception as e:
             print(f"  ❌ An error occurred processing {entry_name}: {e}")
             
@@ -151,15 +155,9 @@ def check_for_duplicates(worksheet, sales_records):
     print("Checking for duplicate entries...")
     try:
         existing_data = worksheet.get_all_values()
-        # Create a set of existing invoice IDs (from the 3rd column, index 2)
         existing_invoices = set(row[2] for row in existing_data[1:]) # Skip header
         
-        unique_records = []
-        for record in sales_records:
-            if record['invoice'] not in existing_invoices:
-                unique_records.append(record)
-            else:
-                print(f"  - Skipping duplicate invoice: #{record['invoice']}")
+        unique_records = [r for r in sales_records if r['invoice'] not in existing_invoices]
         
         print(f"Found {len(unique_records)} new unique sales to add.")
         return unique_records
@@ -169,7 +167,7 @@ def check_for_duplicates(worksheet, sales_records):
 
 def main():
     """Main function to orchestrate the scraping and data upload process."""
-    print("\n======== Starting PythonAnywhere Scraper ========")
+    print("\n======== Starting Final Scraper ========")
     
     spreadsheet_id, drive_folder_id = load_environment_variables()
     if not spreadsheet_id: return
@@ -199,18 +197,15 @@ def main():
             print("No new data to upload.")
             return
 
-        # --- Update Google Sheet ---
         print("Opening Google Sheet...")
         worksheet = gc.open_by_key(spreadsheet_id).sheet1
 
-        # NEW: Check for duplicates before proceeding
         unique_sales_data = check_for_duplicates(worksheet, sales_data)
 
         if not unique_sales_data:
-            print("No new unique data to upload.")
+            print("No new unique data to upload (all entries were duplicates).")
             return
 
-        # --- Screenshot and Upload (only if there's new data) ---
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         screenshot_filename = f"sales_screenshot_{timestamp}.png"
         temp_dir = tempfile.gettempdir()
@@ -224,20 +219,16 @@ def main():
         print("Preparing data for upload...")
         rows_to_append = []
         
-        # Add headers only if the sheet is completely empty
         if not worksheet.get_all_values():
             rows_to_append.append(["Timestamp", "Name", "Invoice ID", "Amount", "Screenshot Link"])
 
         for sale in unique_sales_data:
             rows_to_append.append([
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                sale["name"],
-                sale["invoice"],
-                sale["amount"],
-                screenshot_link
+                sale["name"], sale["invoice"], sale["amount"], screenshot_link
             ])
 
-        print(f"Appending {len(rows_to_append)} rows to the sheet...")
+        print(f"Appending {len(rows_to_append)} unique rows to the sheet...")
         worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
         
         print("🎉 SUCCESS: Data uploaded to Google Sheet!")
