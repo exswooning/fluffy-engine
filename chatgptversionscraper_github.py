@@ -80,10 +80,11 @@ def extract_sales_data(driver):
     time.sleep(random.uniform(3, 8))
     
     driver.get(WEBSITE_URL)
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 30) # Increased timeout for better robustness
     
     print("Waiting for leaderboard to load...")
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.p-4.transition")))
+    # Wait for the main leaderboard container to be present and visible
+    wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div.p-4.transition")))
     time.sleep(random.uniform(4, 7)) # Human-like pause after page load
 
     # --- HUMANIZING: Simulate random scrolling ---
@@ -110,7 +111,8 @@ def extract_sales_data(driver):
             name_match = re.search(r'#\d+\s+(.+)', full_text.split('\n')[0])
             name = name_match.group(1).strip() if name_match else "Unknown"
 
-            if name == "Unknown": continue
+            # --- NEW: Filter by specific name "Aryan Pal" ---
+            if name != "Aryan Pal": continue
 
             print(f"\n--- Processing: {name} ---")
             initial_text_length = len(full_text)
@@ -129,11 +131,15 @@ def extract_sales_data(driver):
             
             if not matches:
                 print(f"  ⚠️ No detailed sales found for {name}.")
+                # Still capture the full text even if no sales match the pattern
+                sale_record = {'name': name, 'amount': 'N/A', 'invoice': 'N/A', 'full_text': expanded_text}
+                all_sales_data.append(sale_record)
                 continue
 
             for amount, invoice_id in matches:
                 clean_amount = amount.replace(',', '')
-                sale_record = {'name': name, 'amount': clean_amount, 'invoice': invoice_id}
+                # --- MODIFIED: Include full_text in the record ---
+                sale_record = {'name': name, 'amount': clean_amount, 'invoice': invoice_id, 'full_text': expanded_text}
                 all_sales_data.append(sale_record)
                 print(f"  ✓ Extracted Sale: Amount=Rs.{clean_amount}, Invoice=#{invoice_id}")
         
@@ -145,14 +151,24 @@ def extract_sales_data(driver):
     return all_sales_data
 
 def update_spreadsheet(gc, sheet_id, sales_data):
-    """Updates the Google Sheet with new, unique sales data."""
+    """Updates the Google Sheet with new, unique sales data, including full text."""
     if not sales_data:
         print("No new data to upload.")
         return
+    
+    worksheet_name = "Aryan Pal Data"
+    
     try:
-        print("Opening Google Sheet...")
-        worksheet = gc.open_by_key(sheet_id).sheet1
+        print(f"Opening Google Sheet and finding worksheet '{worksheet_name}'...")
+        spreadsheet = gc.open_by_key(sheet_id)
         
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            print(f"Worksheet '{worksheet_name}' not found. Creating new worksheet...")
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows="100", cols="20")
+
+        # Check for existing invoices (assuming Invoice ID is in column 3)
         existing_invoices = set(worksheet.col_values(3)[1:])
         unique_sales = [s for s in sales_data if s['invoice'] not in existing_invoices]
         
@@ -162,17 +178,23 @@ def update_spreadsheet(gc, sheet_id, sales_data):
             
         print(f"Preparing {len(unique_sales)} unique rows for upload...")
         rows_to_append = []
-        if not worksheet.get_all_values(): # Add headers if sheet is empty
-            rows_to_append.append(["Timestamp", "Name", "Invoice ID", "Amount"])
+        
+        # Check if the sheet is empty or only contains headers
+        if not worksheet.get_all_values() or len(worksheet.get_all_values()) == 1 and worksheet.get_all_values()[0] == ['']:
+            # Add new headers including the full text
+            rows_to_append.append(["Timestamp", "Name", "Invoice ID", "Amount", "Full Scraped Text"])
 
         for sale in unique_sales:
             rows_to_append.append([
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                sale["name"], sale["invoice"], sale["amount"]
+                sale["name"], 
+                sale["invoice"], 
+                sale["amount"],
+                sale["full_text"] # New field
             ])
 
         worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
-        print(f"🎉 SUCCESS: Appended {len(unique_sales)} new rows to the sheet!")
+        print(f"🎉 SUCCESS: Appended {len(unique_sales)} new rows to the sheet '{worksheet_name}'!")
     except Exception as e:
         print(f"❌ Failed to update spreadsheet: {e}")
 
@@ -202,4 +224,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
