@@ -29,7 +29,10 @@ USER_AGENTS = [
 def authenticate_google():
     """Authenticates with Google Sheets using service account credentials."""
     try:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds = Credentials.from_service_account_file(
+            CREDENTIALS_FILE,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
         gc = gspread.authorize(creds)
         print("✓ Google authentication successful.")
         return gc
@@ -41,12 +44,12 @@ def setup_driver():
     """Sets up a headless Chrome driver with enhanced stealth options."""
     print("Setting up stealth browser driver...")
     options = webdriver.ChromeOptions()
-    
+
     # --- STEALTH: Rotate User-Agent ---
     user_agent = random.choice(USER_AGENTS)
     options.add_argument(f'user-agent={user_agent}')
     print(f"  > Using User-Agent: {user_agent}")
-    
+
     # --- STEALTH: Use a proxy if available ---
     proxy_url = os.getenv("PROXY_URL")
     if proxy_url:
@@ -61,31 +64,33 @@ def setup_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    
+
     try:
         service = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         # --- STEALTH: Spoof the navigator.webdriver property ---
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
         return driver
     except Exception as e:
         print(f"❌ WebDriver setup failed: {e}")
         return None
 
 def extract_sales_data(driver):
-    """Navigates, humanizes interactions, and extracts sales data."""
+    """Navigates, humanizes interactions, and extracts sales data for ALL names."""
     all_sales_data = []
-    
+
     # --- HUMANIZING: Random initial delay before visiting site ---
     time.sleep(random.uniform(3, 8))
-    
+
     driver.get(WEBSITE_URL)
-    wait = WebDriverWait(driver, 30) # Increased timeout for better robustness
-    
+    wait = WebDriverWait(driver, 30)  # Increased timeout for better robustness
+
     print("Waiting for leaderboard to load...")
     # Wait for the main leaderboard container to be present and visible
     wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div.p-4.transition")))
-    time.sleep(random.uniform(4, 7)) # Human-like pause after page load
+    time.sleep(random.uniform(4, 7))  # Human-like pause after page load
 
     # --- HUMANIZING: Simulate random scrolling ---
     print("Simulating human-like scrolling...")
@@ -105,49 +110,59 @@ def extract_sales_data(driver):
         try:
             # Re-find elements to avoid stale references
             entry = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i]
-            
-            # --- FIXED NAME EXTRACTION ---
-            full_text = entry.text
-            name_match = re.search(r'#\d+\s+(.+)', full_text.split('\n')[0])
-            name = name_match.group(1).strip() if name_match else "Unknown"
 
-            # --- NEW: Filter by specific name "Aryan Pal" ---
-            if name != "Aryan Pal": continue
+            # Extract name from first line, e.g. "#1 Some Name"
+            full_text = entry.text
+            first_line = full_text.split('\n')[0]
+            name_match = re.search(r'#\d+\s+(.+)', first_line)
+            name = name_match.group(1).strip() if name_match else "Unknown"
 
             print(f"\n--- Processing: {name} ---")
             initial_text_length = len(full_text)
-            
+
             # --- HUMANIZING: Simulate complex mouse movement before clicking ---
             actions = ActionChains(driver)
             actions.move_to_element(entry).pause(random.uniform(0.3, 0.7)).click().perform()
-            
+
             # Wait for content to expand
-            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i].text) > initial_text_length)
+            wait.until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i].text)
+                > initial_text_length
+            )
             print(f"  ✓ Entry for {name} expanded.")
-            
+
             expanded_text = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i].text
             sales_pattern = r"Sale of Rs\.?\s*([\d,]+\.?\d*).*?Invoice ID:\s*#?(\d+)"
             matches = re.findall(sales_pattern, expanded_text, re.IGNORECASE)
-            
+
             if not matches:
                 print(f"  ⚠️ No detailed sales found for {name}.")
                 # Still capture the full text even if no sales match the pattern
-                sale_record = {'name': name, 'amount': 'N/A', 'invoice': 'N/A', 'full_text': expanded_text}
+                sale_record = {
+                    'name': name,
+                    'amount': 'N/A',
+                    'invoice': 'N/A',
+                    'full_text': expanded_text
+                }
                 all_sales_data.append(sale_record)
                 continue
 
             for amount, invoice_id in matches:
                 clean_amount = amount.replace(',', '')
-                # --- MODIFIED: Include full_text in the record ---
-                sale_record = {'name': name, 'amount': clean_amount, 'invoice': invoice_id, 'full_text': expanded_text}
+                sale_record = {
+                    'name': name,
+                    'amount': clean_amount,
+                    'invoice': invoice_id,
+                    'full_text': expanded_text
+                }
                 all_sales_data.append(sale_record)
                 print(f"  ✓ Extracted Sale: Amount=Rs.{clean_amount}, Invoice=#{invoice_id}")
-        
+
         except TimeoutException:
             print(f"  ❌ Timed out waiting for an entry to expand. Skipping.")
         except Exception as e:
             print(f"  ❌ An error occurred processing an entry: {e}")
-            
+
     return all_sales_data
 
 def update_spreadsheet(gc, sheet_id, sales_data):
@@ -155,13 +170,13 @@ def update_spreadsheet(gc, sheet_id, sales_data):
     if not sales_data:
         print("No new data to upload.")
         return
-    
-    worksheet_name = "Aryan Pal Data"
-    
+
+    worksheet_name = "Sales Data"  # Generic sheet name for all users
+
     try:
         print(f"Opening Google Sheet and finding worksheet '{worksheet_name}'...")
         spreadsheet = gc.open_by_key(sheet_id)
-        
+
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
@@ -171,26 +186,28 @@ def update_spreadsheet(gc, sheet_id, sales_data):
         # Check for existing invoices (assuming Invoice ID is in column 3)
         existing_invoices = set(worksheet.col_values(3)[1:])
         unique_sales = [s for s in sales_data if s['invoice'] not in existing_invoices]
-        
+
         if not unique_sales:
             print("No new unique sales to add (all were duplicates).")
             return
-            
+
         print(f"Preparing {len(unique_sales)} unique rows for upload...")
         rows_to_append = []
-        
-        # Check if the sheet is empty or only contains headers
-        if not worksheet.get_all_values() or len(worksheet.get_all_values()) == 1 and worksheet.get_all_values()[0] == ['']:
-            # Add new headers including the full text
+
+        existing_values = worksheet.get_all_values()
+        sheet_has_data = bool(existing_values and not (len(existing_values) == 1 and existing_values[0] == ['']))
+
+        # Add headers if sheet is empty or only has a blank row
+        if not sheet_has_data:
             rows_to_append.append(["Timestamp", "Name", "Invoice ID", "Amount", "Full Scraped Text"])
 
         for sale in unique_sales:
             rows_to_append.append([
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                sale["name"], 
-                sale["invoice"], 
+                sale["name"],
+                sale["invoice"],
                 sale["amount"],
-                sale["full_text"] # New field
+                sale["full_text"]
             ])
 
         worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
@@ -200,20 +217,22 @@ def update_spreadsheet(gc, sheet_id, sales_data):
 
 def main():
     """Main function to run the scraper."""
-    print("\n======== Starting Stealth Scraper v3 ========")
+    print("\n======== Starting Stealth Scraper v4 (All Names) ========")
     load_dotenv()
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    
+
     if not sheet_id:
         print("Error: GOOGLE_SHEET_ID not found.")
         return
 
     gc = authenticate_google()
-    if not gc: return
+    if not gc:
+        return
 
     driver = setup_driver()
-    if not driver: return
-    
+    if not driver:
+        return
+
     try:
         sales_data = extract_sales_data(driver)
         update_spreadsheet(gc, sheet_id, sales_data)
