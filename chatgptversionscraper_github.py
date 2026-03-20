@@ -1,4 +1,5 @@
 import os
+import sys
 import datetime
 import time
 import random
@@ -85,12 +86,11 @@ def extract_sales_data(driver):
     time.sleep(random.uniform(3, 8))
 
     driver.get(WEBSITE_URL)
-    wait = WebDriverWait(driver, 30)  # Increased timeout for better robustness
+    wait = WebDriverWait(driver, 30)
 
     print("Waiting for leaderboard to load...")
-    # Wait for the main leaderboard container to be present and visible
     wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div.p-4.transition")))
-    time.sleep(random.uniform(4, 7))  # Human-like pause after page load
+    time.sleep(random.uniform(4, 7))
 
     # --- HUMANIZING: Simulate random scrolling ---
     print("Simulating human-like scrolling...")
@@ -102,16 +102,17 @@ def extract_sales_data(driver):
     leaderboard_entries = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")
     print(f"Found {len(leaderboard_entries)} leaderboard entries.")
 
+    if not leaderboard_entries:
+        raise RuntimeError("No leaderboard entries found — page may not have loaded correctly.")
+
     # --- HUMANIZING: Process entries in a random order ---
     entry_indices = list(range(len(leaderboard_entries)))
     random.shuffle(entry_indices)
 
     for i in entry_indices:
         try:
-            # Re-find elements to avoid stale references
             entry = driver.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i]
 
-            # Extract name from first line, e.g. "#1 Some Name"
             full_text = entry.text
             first_line = full_text.split('\n')[0]
             name_match = re.search(r'#\d+\s+(.+)', first_line)
@@ -120,11 +121,9 @@ def extract_sales_data(driver):
             print(f"\n--- Processing: {name} ---")
             initial_text_length = len(full_text)
 
-            # --- HUMANIZING: Simulate complex mouse movement before clicking ---
             actions = ActionChains(driver)
             actions.move_to_element(entry).pause(random.uniform(0.3, 0.7)).click().perform()
 
-            # Wait for content to expand
             wait.until(
                 lambda d: len(d.find_elements(By.CSS_SELECTOR, "div.p-4.transition")[i].text)
                 > initial_text_length
@@ -137,7 +136,6 @@ def extract_sales_data(driver):
 
             if not matches:
                 print(f"  ⚠️ No detailed sales found for {name}.")
-                # Still capture the full text even if no sales match the pattern
                 sale_record = {
                     'name': name,
                     'amount': 'N/A',
@@ -171,7 +169,7 @@ def update_spreadsheet(gc, sheet_id, sales_data):
         print("No new data to upload.")
         return
 
-    worksheet_name = "Sales Data"  # Generic sheet name for all users
+    worksheet_name = "Sales Data"
 
     try:
         print(f"Opening Google Sheet and finding worksheet '{worksheet_name}'...")
@@ -183,7 +181,6 @@ def update_spreadsheet(gc, sheet_id, sales_data):
             print(f"Worksheet '{worksheet_name}' not found. Creating new worksheet...")
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows="100", cols="20")
 
-        # Check for existing invoices (assuming Invoice ID is in column 3)
         existing_invoices = set(worksheet.col_values(3)[1:])
         unique_sales = [s for s in sales_data if s['invoice'] not in existing_invoices]
 
@@ -197,7 +194,6 @@ def update_spreadsheet(gc, sheet_id, sales_data):
         existing_values = worksheet.get_all_values()
         sheet_has_data = bool(existing_values and not (len(existing_values) == 1 and existing_values[0] == ['']))
 
-        # Add headers if sheet is empty or only has a blank row
         if not sheet_has_data:
             rows_to_append.append(["Timestamp", "Name", "Invoice ID", "Amount", "Full Scraped Text"])
 
@@ -214,32 +210,39 @@ def update_spreadsheet(gc, sheet_id, sales_data):
         print(f"🎉 SUCCESS: Appended {len(unique_sales)} new rows to the sheet '{worksheet_name}'!")
     except Exception as e:
         print(f"❌ Failed to update spreadsheet: {e}")
+        raise  # Re-raise so the caller knows the upload failed
 
 def main():
-    """Main function to run the scraper."""
-    print("\n======== Starting Stealth Scraper v4 (All Names) ========")
+    """Main function to run the scraper. Exits with code 0 on success, 1 on failure."""
+    attempt = int(os.getenv("SCRAPE_ATTEMPT", "1"))
+    print(f"\n======== Starting Stealth Scraper v4 (All Names) — Attempt #{attempt} ========")
+
     load_dotenv()
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
 
     if not sheet_id:
-        print("Error: GOOGLE_SHEET_ID not found.")
-        return
+        print("❌ Error: GOOGLE_SHEET_ID not found in environment.")
+        sys.exit(1)
 
     gc = authenticate_google()
     if not gc:
-        return
+        sys.exit(1)
 
     driver = setup_driver()
     if not driver:
-        return
+        sys.exit(1)
 
     try:
         sales_data = extract_sales_data(driver)
         update_spreadsheet(gc, sheet_id, sales_data)
+        print("\n✅ Scrape completed successfully.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Scrape failed with error: {e}")
+        sys.exit(1)
     finally:
-        if driver:
-            driver.quit()
-        print("\n======== Script Finished ========")
+        driver.quit()
+        print("======== Script Finished ========")
 
 if __name__ == "__main__":
     main()
